@@ -53,11 +53,18 @@ class Face_detect_crop:
 
     def get(self, img, crop_size, max_num=0):
         bboxes, kpss = self.det_model.detect(img,
-                                             threshold=self.det_thresh,
                                              max_num=max_num,
                                              metric='default')
-        if bboxes.shape[0] == 0:
+        if bboxes is None or bboxes.shape[0] == 0:
             return None
+        if self.det_thresh is not None:
+            scores = bboxes[:, 4]
+            keep = scores >= self.det_thresh
+            bboxes = bboxes[keep]
+            if kpss is not None:
+                kpss = kpss[keep]
+            if bboxes.shape[0] == 0:
+                return None
         # ret = []
         # for i in range(bboxes.shape[0]):
         #     bbox = bboxes[i, 0:4]
@@ -82,7 +89,7 @@ class Face_detect_crop:
         kps = None
         if kpss is not None:
             kps = kpss[best_index]
-        M, _ = face_align.estimate_norm(kps, crop_size, mode ='None') 
+        M = face_align.estimate_norm(kps, crop_size, mode='None') 
         align_img = cv2.warpAffine(img, M, (crop_size, crop_size), borderValue=0.0)
         
         return [align_img], [M]

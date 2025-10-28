@@ -2,10 +2,12 @@ import base64
 from io import BytesIO
 from typing import Callable, List
 
+from typing import Callable, List
+
 import numpy as np
 import torch
 import cv2
-from .masks import face_mask_static 
+from .masks import face_mask_static
 from matplotlib import pyplot as plt
 from insightface.utils import face_align
 
@@ -15,33 +17,33 @@ def crop_face(image_full: np.ndarray, app: Callable, crop_size: int) -> np.ndarr
     Crop face from image and resize
     """
     kps = app.get(image_full, crop_size)
-    M, _ = face_align.estimate_norm(kps[0], crop_size, mode ='None') 
+    M = face_align.estimate_norm(kps[0], crop_size, mode='None')
     align_img = cv2.warpAffine(image_full, M, (crop_size, crop_size), borderValue=0.0)         
     return [align_img]
 
 
-def normalize_and_torch(image: np.ndarray) -> torch.tensor:
+def normalize_and_torch(image: np.ndarray, device: torch.device) -> torch.Tensor:
     """
     Normalize image and transform to torch
     """
-    image = torch.tensor(image.copy(), dtype=torch.float32).cuda()
-    if image.max() > 1.:
-        image = image/255.
-    
-    image = image.permute(2, 0, 1).unsqueeze(0)
-    image = (image - 0.5) / 0.5
+    image_tensor = torch.tensor(image.copy(), dtype=torch.float32, device=device)
+    if image_tensor.max().item() > 1.0:
+        image_tensor = image_tensor / 255.0
 
-    return image
+    image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)
+    image_tensor = (image_tensor - 0.5) / 0.5
+
+    return image_tensor
 
 
-def normalize_and_torch_batch(frames: np.ndarray) -> torch.tensor:
+def normalize_and_torch_batch(frames: np.ndarray, device: torch.device) -> torch.Tensor:
     """
     Normalize batch images and transform to torch
     """
-    batch_frames = torch.from_numpy(frames.copy()).cuda()
-    if batch_frames.max() > 1.:
-        batch_frames = batch_frames/255.
-    
+    batch_frames = torch.tensor(frames.copy(), dtype=torch.float32, device=device)
+    if batch_frames.max().item() > 1.0:
+        batch_frames = batch_frames / 255.0
+
     batch_frames = batch_frames.permute(0, 3, 1, 2)
     batch_frames = (batch_frames - 0.5)/0.5
 
@@ -61,11 +63,21 @@ def get_final_image(final_frames: List[np.ndarray],
     
     for i in range(len(final_frames)):
         frame = cv2.resize(final_frames[i][0], (224, 224))
-        
-        landmarks = handler.get_without_detection_without_transform(frame)     
-        landmarks_tgt = handler.get_without_detection_without_transform(crop_frames[i][0])
 
-        mask, _ = face_mask_static(crop_frames[i][0], landmarks, landmarks_tgt, params[i])
+        try:
+            landmarks_tgt = handler.get_without_detection_without_transform(crop_frames[i][0])
+        except ValueError:
+            landmarks_tgt = None
+        try:
+            landmarks = handler.get_without_detection_without_transform(frame)
+        except ValueError:
+            landmarks = landmarks_tgt
+
+        if landmarks is None or landmarks_tgt is None:
+            mask = np.ones((224, 224), dtype=np.float32)
+            params[i] = params[i] or [5, 5, 5]
+        else:
+            mask, params[i] = face_mask_static(crop_frames[i][0], landmarks, landmarks_tgt, params[i])
         mat_rev = cv2.invertAffineTransform(tfm_arrays[i][0])
 
         swap_t = cv2.warpAffine(frame, mat_rev, (full_frame.shape[1], full_frame.shape[0]), borderMode=cv2.BORDER_REPLICATE)

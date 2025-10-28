@@ -1,237 +1,90 @@
-import cv2
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable
+
 import numpy as np
-import os
-import mxnet as mx
-from skimage import transform as trans
-import insightface
-import sys
-# sys.path.append('/home/jovyan/FaceShifter-2/FaceShifter3/')
-from insightface_func.face_detect_crop_single import Face_detect_crop
-import kornia
+from insightface.app import FaceAnalysis
 
 
-M = np.array([[ 0.57142857, 0., 32.],[ 0.,0.57142857, 32.]])
-IM = np.array([[[1.75, -0., -56.],[ -0., 1.75, -56.]]])
+@dataclass
+class _FaceLandmarks:
+    """Container for the landmark output returned by :class:`FaceAnalysis`."""
 
+    points: np.ndarray
 
-def square_crop(im, S):
-    if im.shape[0] > im.shape[1]:
-        height = S
-        width = int(float(im.shape[1]) / im.shape[0] * S)
-        scale = float(S) / im.shape[0]
-    else:
-        width = S
-        height = int(float(im.shape[0]) / im.shape[1] * S)
-        scale = float(S) / im.shape[1]
-    resized_im = cv2.resize(im, (width, height))
-    det_im = np.zeros((S, S, 3), dtype=np.uint8)
-    det_im[:resized_im.shape[0], :resized_im.shape[1], :] = resized_im
-    return det_im, scale
-
-
-def transform(data, center, output_size, scale, rotation):
-    scale_ratio = scale
-    rot = float(rotation) * np.pi / 180.0
-    #translation = (output_size/2-center[0]*scale_ratio, output_size/2-center[1]*scale_ratio)
-    t1 = trans.SimilarityTransform(scale=scale_ratio)
-    cx = center[0] * scale_ratio
-    cy = center[1] * scale_ratio
-    t2 = trans.SimilarityTransform(translation=(-1 * cx, -1 * cy))
-    t3 = trans.SimilarityTransform(rotation=rot)
-    t4 = trans.SimilarityTransform(translation=(output_size / 2,
-                                                output_size / 2))
-    t = t1 + t2 + t3 + t4
-    M = t.params[0:2]
-    cropped = cv2.warpAffine(data,
-                             M, (output_size, output_size),
-                             borderValue=0.0)
-    return cropped, M
-
-
-def trans_points2d_batch(pts, M):
-    new_pts = np.zeros(shape=pts.shape, dtype=np.float32)
-    for j in range(pts.shape[0]):
-        for i in range(pts.shape[1]):
-            pt = pts[j][i]
-            new_pt = np.array([pt[0], pt[1], 1.], dtype=np.float32)
-            new_pt = np.dot(M[j], new_pt)
-            new_pts[j][i] = new_pt[0:2]
-    return new_pts
-
-
-def trans_points2d(pts, M):
-    new_pts = np.zeros(shape=pts.shape, dtype=np.float32)
-    for i in range(pts.shape[0]):
-        pt = pts[i]
-        new_pt = np.array([pt[0], pt[1], 1.], dtype=np.float32)
-        new_pt = np.dot(M, new_pt)
-        #print('new_pt', new_pt.shape, new_pt)
-        new_pts[i] = new_pt[0:2]
-
-    return new_pts
-
-
-def trans_points3d(pts, M):
-    scale = np.sqrt(M[0][0] * M[0][0] + M[0][1] * M[0][1])
-    #print(scale)
-    new_pts = np.zeros(shape=pts.shape, dtype=np.float32)
-    for i in range(pts.shape[0]):
-        pt = pts[i]
-        new_pt = np.array([pt[0], pt[1], 1.], dtype=np.float32)
-        new_pt = np.dot(M, new_pt)
-        #print('new_pt', new_pt.shape, new_pt)
-        new_pts[i][0:2] = new_pt[0:2]
-        new_pts[i][2] = pts[i][2] * scale
-
-    return new_pts
-
-
-def trans_points(pts, M):
-    if pts.shape[1] == 2:
-        return trans_points2d(pts, M)
-    else:
-        return trans_points3d(pts, M)
+    @classmethod
+    def from_face(cls, face) -> "_FaceLandmarks":  # type: ignore[type-arg]
+        if not hasattr(face, "landmark_2d_106"):
+            raise ValueError("InsightFace model did not return 106-point landmarks.")
+        return cls(points=np.asarray(face.landmark_2d_106, dtype=np.float32))
 
 
 class Handler:
-    def __init__(self, prefix, epoch, im_size=192, det_size=224, ctx_id=0, root='./insightface_func/models'):
-        print('loading', prefix, epoch)
-        if ctx_id >= 0:
-            ctx = mx.gpu(ctx_id)
-        else:
-            ctx = mx.cpu()
-        image_size = (im_size, im_size)
-#         self.detector = insightface.model_zoo.get_model(
-#             'retinaface_mnet025_v2')  #can replace with your own face detector
-        self.detector = Face_detect_crop(name='antelope', root=root)
-        self.detector.prepare(ctx_id=ctx_id, det_thresh=0.6, det_size=(640,640))
-        #self.detector = insightface.model_zoo.get_model('retinaface_r50_v1')
-        #self.detector.prepare(ctx_id=ctx_id)
-        self.det_size = det_size
-        sym, arg_params, aux_params = mx.model.load_checkpoint(prefix, epoch)
-        all_layers = sym.get_internals()
-        sym = all_layers['fc1_output']
-        self.image_size = image_size
-        model = mx.mod.Module(symbol=sym, context=ctx, label_names=None)
-        model.bind(for_training=False,
-                   data_shapes=[('data', (1, 3, image_size[0], image_size[1]))
-                                ])
-        model.set_params(arg_params, aux_params)
-        self.model = model
-        self.image_size = image_size
-    
-    
-    def get_without_detection_batch(self, img, M, IM):
-        rimg = kornia.warp_affine(img, M.repeat(img.shape[0],1,1), (192, 192), padding_mode='zeros')
-        rimg = kornia.bgr_to_rgb(rimg)
-        
-        data = mx.nd.array(rimg)
-        db = mx.io.DataBatch(data=(data, ))
-        self.model.forward(db, is_train=False)
-        pred = self.model.get_outputs()[-1].asnumpy()
-        pred = pred.reshape((pred.shape[0], -1, 2))  
-        pred[:, :, 0:2] += 1
-        pred[:, :, 0:2] *= (self.image_size[0] // 2)
-        
-        pred = trans_points2d_batch(pred, IM.repeat(img.shape[0],1,1).numpy())
-        
-        return pred
-    
-    
-    def get_without_detection_without_transform(self, img):
-        input_blob = np.zeros((1, 3) + self.image_size, dtype=np.float32)
-        rimg = cv2.warpAffine(img, M, self.image_size, borderValue=0.0)
-        rimg = cv2.cvtColor(rimg, cv2.COLOR_BGR2RGB)
-        rimg = np.transpose(rimg, (2, 0, 1))  #3*112*112, RGB
-        
-        input_blob[0] = rimg
-        data = mx.nd.array(input_blob)
-        db = mx.io.DataBatch(data=(data, ))
-        self.model.forward(db, is_train=False)
-        pred = self.model.get_outputs()[-1].asnumpy()[0]
-        pred = pred.reshape((-1, 2))
-        pred[:, 0:2] += 1
-        pred[:, 0:2] *= (self.image_size[0] // 2)
-        pred = trans_points2d(pred, IM)
-        
-        return pred
-    
-    
-    def get_without_detection(self, img):
-        bbox = [0, 0, img.shape[0], img.shape[1]]
-        input_blob = np.zeros((1, 3) + self.image_size, dtype=np.float32)
-        
-        w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
-        center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
-        rotate = 0
-        _scale = self.image_size[0] * 2 / 3.0 / max(w, h)
-        
-        rimg, M = transform(img, center, self.image_size[0], _scale,
-                            rotate)
-        rimg = cv2.cvtColor(rimg, cv2.COLOR_BGR2RGB)
-        rimg = np.transpose(rimg, (2, 0, 1))  #3*112*112, RGB
-        
-        input_blob[0] = rimg
-        data = mx.nd.array(input_blob)
-        db = mx.io.DataBatch(data=(data, ))
-        self.model.forward(db, is_train=False)
-        pred = self.model.get_outputs()[-1].asnumpy()[0]
-        if pred.shape[0] >= 3000:
-            pred = pred.reshape((-1, 3))
-        else:
-            pred = pred.reshape((-1, 2))
-        pred[:, 0:2] += 1
-        pred[:, 0:2] *= (self.image_size[0] // 2)
-        if pred.shape[1] == 3:
-            pred[:, 2] *= (self.image_size[0] // 2)
+    """Lightweight replacement for the original MXNet-based landmark handler.
 
-        IM = cv2.invertAffineTransform(M)
-        pred = trans_points(pred, IM)
-        
-        return pred
-    
-    
-    def get(self, img, get_all=False):
-        out = []
-        det_im, det_scale = square_crop(img, self.det_size)
-        bboxes, _ = self.detector.detect(det_im)
-        if bboxes.shape[0] == 0:
-            return out
-        bboxes /= det_scale
-        if not get_all:
-            areas = []
-            for i in range(bboxes.shape[0]):
-                x = bboxes[i]
-                area = (x[2] - x[0]) * (x[3] - x[1])
-                areas.append(area)
-            m = np.argsort(areas)[-1]
-            bboxes = bboxes[m:m + 1]
-        for i in range(bboxes.shape[0]):
-            bbox = bboxes[i]
-            input_blob = np.zeros((1, 3) + self.image_size, dtype=np.float32)
-            w, h = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
-            center = (bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2
-            rotate = 0
-            _scale = self.image_size[0] * 2 / 3.0 / max(w, h)
-            rimg, M = transform(img, center, self.image_size[0], _scale,
-                                rotate)
-            rimg = cv2.cvtColor(rimg, cv2.COLOR_BGR2RGB)
-            rimg = np.transpose(rimg, (2, 0, 1))  #3*112*112, RGB
-            input_blob[0] = rimg
-            data = mx.nd.array(input_blob)
-            db = mx.io.DataBatch(data=(data, ))
-            self.model.forward(db, is_train=False)
-            pred = self.model.get_outputs()[-1].asnumpy()[0]
-            if pred.shape[0] >= 3000:
-                pred = pred.reshape((-1, 3))
-            else:
-                pred = pred.reshape((-1, 2))
-            pred[:, 0:2] += 1
-            pred[:, 0:2] *= (self.image_size[0] // 2)
-            if pred.shape[1] == 3:
-                pred[:, 2] *= (self.image_size[0] // 2)
+    The original implementation depended on MXNet 1.x which no longer provides
+    wheels compatible with modern Python versions.  This reimplementation relies
+    on :mod:`insightface.app.FaceAnalysis`, which offers the same 106-point
+    facial landmark predictions while using ONNX Runtime under the hood.  The
+    public methods are kept compatible with the previous handler so that the
+    rest of the inference pipeline can run unchanged.
+    """
 
-            IM = cv2.invertAffineTransform(M)
-            pred = trans_points(pred, IM)
-            out.append(pred)
-        return out
+    def __init__(
+        self,
+        prefix: str,
+        epoch: int,
+        im_size: int = 192,
+        det_size: int = 224,
+        ctx_id: int = 0,
+        root: str = "./insightface_func/models",
+    ) -> None:
+        del prefix  # Unused with the InsightFace implementation.
+        del epoch
+        self._det_size = (det_size, det_size) if isinstance(det_size, int) else det_size
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if ctx_id >= 0 else [
+            "CPUExecutionProvider"
+        ]
+        self._app = FaceAnalysis(name="buffalo_l", root=root, providers=providers)
+        # FaceAnalysis expects -1 for CPU execution.
+        self._app.prepare(ctx_id=ctx_id, det_size=self._det_size)
+
+    def _select_face(self, faces: Iterable[object]) -> _FaceLandmarks:
+        best_face = None
+        best_score: float = float("-inf")
+        for face in faces:
+            score = getattr(face, "det_score", 0.0) or 0.0
+            if score > best_score:
+                best_face = face
+                best_score = score
+        if best_face is None:
+            raise ValueError("No face detected in the provided image.")
+        return _FaceLandmarks.from_face(best_face)
+
+    def _predict_landmarks(self, image: np.ndarray) -> np.ndarray:
+        faces = self._app.get(image)
+        if not faces:
+            raise ValueError("No face detected in the provided image.")
+        return self._select_face(faces).points
+
+    def get_without_detection_without_transform(self, img: np.ndarray) -> np.ndarray:
+        """Return 106-point landmarks for an already cropped face image."""
+
+        return self._predict_landmarks(img)
+
+    # Backwards-compatible aliases -------------------------------------------------
+    def get_without_detection(self, img: np.ndarray, get_all: bool = False) -> np.ndarray:
+        landmarks = self._predict_landmarks(img)
+        if get_all:
+            return np.expand_dims(landmarks, axis=0)
+        return landmarks
+
+    def get_without_detection_batch(
+        self, img: np.ndarray, M: np.ndarray, IM: np.ndarray
+    ) -> np.ndarray:
+        # The batching API is unused in the current inference pipeline.  It is
+        # provided for completeness and to maintain the previous signature.
+        del M, IM
+        landmarks = self._predict_landmarks(img)
+        return np.expand_dims(landmarks, axis=0)

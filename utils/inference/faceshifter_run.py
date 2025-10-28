@@ -12,9 +12,10 @@ def faceshifter_batch(source_emb: torch.tensor,
     bs = target.shape[0]
     assert target.ndim == 4, "target should have 4 dimentions -- B x C x H x W"
     
+    source_emb = source_emb.to(target.device)
     if bs > 1:
         source_emb = torch.cat([source_emb]*bs)
-    
+
     with torch.no_grad():
         Y_st, _ = G(target, source_emb)
         Y_st = (Y_st.permute(0, 2, 3, 1)*0.5 + 0.5)*255

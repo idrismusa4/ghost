@@ -9,7 +9,7 @@ from insightface.utils import face_align
 from scipy.spatial import distance
 
 from .masks import face_mask_static
-from .image_processing import normalize_and_torch, normalize_and_torch_batch, crop_face
+from .image_processing import normalize_and_torch_batch, crop_face
 
 import torch
 import torch.nn.functional as F
@@ -110,11 +110,12 @@ def smooth_landmarks(kps_arr, n = 2):
 
 def crop_frames_and_get_transforms(full_frames: List[np.ndarray],
                 target_embeds: List,
-                app: Callable, 
+                app: Callable,
                 netArc: Callable,
                 crop_size: int,
                 set_target: bool,
-                similarity_th: float) -> Tuple[List[Any], List[Any]]:
+                similarity_th: float,
+                device: torch.device) -> Tuple[List[Any], List[Any]]:
     """
     Crop faces from frames and get respective tranforms
     """
@@ -130,11 +131,11 @@ def crop_frames_and_get_transforms(full_frames: List[np.ndarray],
             if len(kps) > 1 or set_target:
                 faces = []
                 for p in kps:
-                    M, _ = face_align.estimate_norm(p, crop_size, mode ='None') 
+                    M = face_align.estimate_norm(p, crop_size, mode='None')
                     align_img = cv2.warpAffine(frame, M, (crop_size, crop_size), borderValue=0.0)
                     faces.append(align_img)    
                 
-                face_norm = normalize_and_torch_batch(np.array(faces))
+                face_norm = normalize_and_torch_batch(np.array(faces), device=device)
                 face_norm = F.interpolate(face_norm, scale_factor=0.5, mode='bilinear', align_corners=True)
                 face_embeds = netArc(face_norm)
                 face_embeds = F.normalize(face_embeds)
@@ -159,7 +160,7 @@ def crop_frames_and_get_transforms(full_frames: List[np.ndarray],
     for i, frame in tqdm(enumerate(full_frames)):
         for q in range (len(target_embeds)):  
             try:
-                M, _ = face_align.estimate_norm(smooth_kps[q][i], crop_size, mode ='None') 
+                M = face_align.estimate_norm(smooth_kps[q][i], crop_size, mode='None')
                 align_img = cv2.warpAffine(frame, M, (crop_size, crop_size), borderValue=0.0)
                 crop_frames[q].append(align_img)
                 tfm_array[q].append(M)
@@ -167,7 +168,8 @@ def crop_frames_and_get_transforms(full_frames: List[np.ndarray],
                 crop_frames[q].append([])
                 tfm_array[q].append([])     
                 
-    torch.cuda.empty_cache()
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
     return crop_frames, tfm_array
 
 
@@ -193,8 +195,9 @@ def get_final_video(final_frames: List[np.ndarray],
                     full_frames: List[np.ndarray],
                     tfm_array: List[np.ndarray],
                     OUT_VIDEO_NAME: str,
-                    fps: float, 
-                    handler) -> None:
+                    fps: float,
+                    handler,
+                    device: torch.device) -> None:
     """
     Create final video from frames
     """
@@ -222,18 +225,19 @@ def get_final_video(final_frames: List[np.ndarray],
                 else:
                     mask = face_mask_static(swap, landmarks, landmarks_tgt, params[j])    
                         
-                swap = torch.from_numpy(swap).cuda().permute(2,0,1).unsqueeze(0).type(torch.float32)
-                mask = torch.from_numpy(mask).cuda().unsqueeze(0).unsqueeze(0).type(torch.float32)
-                full_frame = torch.from_numpy(result_frames[i]).cuda().permute(2,0,1).unsqueeze(0)
-                mat = torch.from_numpy(tfm_array[j][i]).cuda().unsqueeze(0).type(torch.float32)
-                
+                swap_torch = torch.from_numpy(swap).to(device=device, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
+                mask_torch = torch.from_numpy(mask).to(device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                full_frame = torch.from_numpy(result_frames[i]).to(device=device, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
+                mat = torch.from_numpy(tfm_array[j][i]).to(device=device, dtype=torch.float32).unsqueeze(0)
+
                 mat_rev = kornia.invert_affine_transform(mat)
-                swap_t = kornia.warp_affine(swap, mat_rev, size)
-                mask_t = kornia.warp_affine(mask, mat_rev, size)
+                swap_t = kornia.warp_affine(swap_torch, mat_rev, size)
+                mask_t = kornia.warp_affine(mask_torch, mat_rev, size)
                 final = (mask_t*swap_t + (1-mask_t)*full_frame).type(torch.uint8).squeeze().permute(1,2,0).cpu().detach().numpy()
-                
+
                 result_frames[i] = final
-                torch.cuda.empty_cache()
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
 
             except Exception as e:
                 pass

@@ -6,7 +6,13 @@ import time
 import os
 
 from utils.inference.image_processing import crop_face, get_final_image
-from utils.inference.video_processing import read_video, get_target, get_final_video, add_audio_from_another_video, face_enhancement
+from utils.inference.video_processing import (
+    read_video,
+    get_target,
+    get_final_video,
+    add_audio_from_another_video,
+    face_enhancement,
+)
 from utils.inference.core import model_inference
 
 from network.AEI_Net import AEI_Net
@@ -17,43 +23,54 @@ from models.pix2pix_model import Pix2PixModel
 from models.config_sr import TestOptions
 
 
-def init_models(args):
+def init_models(args, device: torch.device):
+    ctx_id = 0 if device.type == "cuda" else -1
+
     # model for face cropping
     app = Face_detect_crop(name='antelope', root='./insightface_func/models')
-    app.prepare(ctx_id= 0, det_thresh=0.6, det_size=(640,640))
+    app.prepare(ctx_id=ctx_id, det_thresh=0.6, det_size=(640, 640))
 
     # main model for generation
     G = AEI_Net(args.backbone, num_blocks=args.num_blocks, c_id=512)
     G.eval()
-    G.load_state_dict(torch.load(args.G_path, map_location=torch.device('cpu')))
-    G = G.cuda()
-    G = G.half()
+    G.load_state_dict(torch.load(args.G_path, map_location=device))
+    G = G.to(device)
+    if device.type == "cuda":
+        G = G.half()
 
     # arcface model to get face embedding
-    netArc = iresnet100(fp16=False)
-    netArc.load_state_dict(torch.load('arcface_model/backbone.pth'))
-    netArc=netArc.cuda()
+    netArc = iresnet100(fp16=device.type == "cuda")
+    netArc.load_state_dict(torch.load('arcface_model/backbone.pth', map_location=device))
+    netArc = netArc.to(device)
     netArc.eval()
 
-    # model to get face landmarks 
-    handler = Handler('./coordinate_reg/model/2d106det', 0, ctx_id=0, det_size=640)
+    # model to get face landmarks
+    handler = Handler('./coordinate_reg/model/2d106det', 0, ctx_id=ctx_id, det_size=640)
 
     # model to make superres of face, set use_sr=True if you want to use super resolution or use_sr=False if you don't
     if args.use_sr:
+        if device.type != "cuda":
+            raise RuntimeError("Super resolution is only supported on CUDA devices.")
         os.environ['CUDA_VISIBLE_DEVICES'] = '0'
         torch.backends.cudnn.benchmark = True
         opt = TestOptions()
-        #opt.which_epoch ='10_7'
         model = Pix2PixModel(opt)
         model.netG.train()
     else:
         model = None
-    
+
     return app, G, netArc, handler, model
-    
-    
+
+
 def main(args):
-    app, G, netArc, handler, model = init_models(args)
+    requested_device = args.device.lower()
+    if requested_device == 'cuda' and not torch.cuda.is_available():
+        print('CUDA was requested but is unavailable. Falling back to CPU execution.')
+        requested_device = 'cpu'
+    device = torch.device(requested_device)
+    print(f'Using device: {device}')
+
+    app, G, netArc, handler, model = init_models(args, device)
     
     # get crops from source images
     print('List of source paths: ',args.source_paths)
@@ -92,27 +109,33 @@ def main(args):
             exit()
         
     start = time.time()
-    final_frames_list, crop_frames_list, full_frames, tfm_array_list = model_inference(full_frames,
-                                                                                       source,
-                                                                                       target,
-                                                                                       netArc,
-                                                                                       G,
-                                                                                       app, 
-                                                                                       set_target,
-                                                                                       similarity_th=args.similarity_th,
-                                                                                       crop_size=args.crop_size,
-                                                                                       BS=args.batch_size)
+    final_frames_list, crop_frames_list, full_frames, tfm_array_list = model_inference(
+        full_frames,
+        source,
+        target,
+        netArc,
+        G,
+        app,
+        set_target,
+        similarity_th=args.similarity_th,
+        crop_size=args.crop_size,
+        BS=args.batch_size,
+        device=device,
+    )
     if args.use_sr:
         final_frames_list = face_enhancement(final_frames_list, model)
     
     if not args.image_to_image:
-        get_final_video(final_frames_list,
-                        crop_frames_list,
-                        full_frames,
-                        tfm_array_list,
-                        args.out_video_name,
-                        fps, 
-                        handler)
+        get_final_video(
+            final_frames_list,
+            crop_frames_list,
+            full_frames,
+            tfm_array_list,
+            args.out_video_name,
+            fps,
+            handler,
+            device=device,
+        )
         
         add_audio_from_another_video(args.target_video, args.out_video_name, "audio")
         print(f"Video saved with path {args.out_video_name}")
@@ -136,6 +159,8 @@ if __name__ == "__main__":
     parser.add_argument('--crop_size', default=224, type=int, help="Don't change this")
     parser.add_argument('--use_sr', default=False, type=bool, help='True for super resolution on swap images')
     parser.add_argument('--similarity_th', default=0.15, type=float, help='Threshold for selecting a face similar to the target')
+
+    parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'], help='Device to run inference on (default: cuda)')
     
     parser.add_argument('--source_paths', default=['examples/images/mark.jpg', 'examples/images/elon_musk.jpg'], nargs='+')
     parser.add_argument('--target_faces_paths', default=[], nargs='+', help="It's necessary to set the face/faces in the video to which the source face/faces is swapped. You can skip this parametr, and then any face is selected in the target video for swap.")
