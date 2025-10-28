@@ -1,15 +1,19 @@
-numpy
--f https://download.pytorch.org/whl/torch_stable.html
-torch==1.6.0+cu101
--f https://download.pytorch.org/whl/torch_stable.html
-torchvision==0.7.0+cu101
-opencv-python
-onnx==1.9.0
-onnxruntime-gpu==1.4.0
-mxnet-cu101mkl
-scikit-image
-insightface==0.2.1
-requests==2.25.1
-kornia==0.5.4
-dill
-wandb
+numpy==1.26.4
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+opencv-python-headless==4.8.1.78
+onnx==1.16.0
+onnxruntime==1.19.2
+scikit-image==0.24.0
+insightface==0.7.3
+requests==2.32.5
+kornia==0.7.2
+dill==0.3.8
+wandb==0.17.9
+tqdm==4.66.5
+scipy==1.13.1
+matplotlib==3.10.7
+albumentations==1.3.1
+qudida==0.0.4
+prettytable==3.16.0
